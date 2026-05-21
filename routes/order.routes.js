@@ -12,140 +12,151 @@ const isAdmin = require("../middlewares/isAdmin");
  */
 router.post("/", auth, async (req, res) => {
   console.log("--- Bắt đầu xử lý đơn hàng ---");
-  console.log("Dữ liệu nhận được:", JSON.stringify(req.body, null, 2));
-
   const conn = await db.getConnection();
 
   try {
-    // 1️⃣ Lấy thêm trường address và fullname/phone từ body (React gửi lên)
     const { items, coupon_code, note, address, fullname, phone } = req.body;
+    console.log(fullname);
+
     const user_id = req.user?.id || null;
 
-    // Kiểm tra đầu vào cơ bản
+    // 1️⃣ VALIDATION CƠ BẢN (Không cần DB)
     if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ message: "Đơn hàng không có sản phẩm nào." });
+      return res
+        .status(400)
+        .json({ message: "Đơn hàng không có sản phẩm nào." });
     }
-
-    if (!address) {
-      return res.status(400).json({ message: "Vui lòng cung cấp địa chỉ giao hàng." });
+    if (!address || !phone) {
+      return res.status(400).json({
+        message: "Vui lòng cung cấp địa chỉ và số điện thoại giao hàng.",
+      });
     }
 
     await conn.beginTransaction();
 
-    // 2️⃣ Cập nhật thông tin vào bảng USER (Lưu địa chỉ/SĐT mới nhất cho khách)
-    if (user_id) {
-      console.log(`Cập nhật thông tin mới nhất cho User ID: ${user_id}`);
-      await conn.query(
-        "UPDATE users SET address = ?, phone = ? WHERE id = ?",
-        [address, phone, user_id]
-      );
-    }
-
-    // 3️⃣ Tính toán và làm sạch dữ liệu items
+    // 2️⃣ KIỂM TRA TỒN KHO (Check trước khi ghi)
     let totalAmount = 0;
-    const sanitizedItems = items.map((item, index) => {
-      const p_id = parseInt(item.product_id);
-      const p_price = parseFloat(item.price);
-      const p_qty = parseInt(item.quantity);
-      const p_name = item.product_name || `Sản phẩm ${index + 1}`;
+    const productChecks = [];
 
-      if (isNaN(p_id) || isNaN(p_price) || isNaN(p_qty)) {
-        throw new Error(`Dữ liệu sản phẩm tại dòng ${index + 1} không hợp lệ.`);
+    for (const item of items) {
+      const [rows] = await conn.query(
+        "SELECT id, title, stock, sale_price FROM books WHERE id = ? FOR UPDATE",
+        [item.product_id],
+      );
+      const product = rows[0];
+
+      if (!product) {
+        throw new Error(`Sản phẩm ID ${item.product_id} không tồn tại.`);
+      }
+      if (product.stock < item.quantity) {
+        throw new Error(
+          `Sách '${product.title}' hiện chỉ còn ${product.stock} cuốn.`,
+        );
       }
 
-      const itemTotal = p_price * p_qty;
+      const price = parseFloat(product.sale_price);
+      const qty = parseInt(item.quantity);
+      const itemTotal = price * qty;
       totalAmount += itemTotal;
 
-      return {
-        product_id: p_id,
-        product_name: p_name,
-        price: p_price,
-        quantity: p_qty,
-        total: itemTotal
-      };
-    });
+      productChecks.push({
+        ...product,
+        order_qty: qty,
+        itemTotal: itemTotal,
+      });
+    }
 
-    // 4️⃣ Xử lý Coupon
+    // 3️⃣ KIỂM TRA COUPON (Nếu có)
     let discountAmount = 0;
     let couponId = null;
 
     if (coupon_code) {
       const [coupons] = await conn.query(
-        "SELECT * FROM coupons WHERE code = ? AND status = 1 AND quantity > 0 AND expired_at >= CURDATE()",
-        [coupon_code]
+        "SELECT * FROM coupons WHERE code = ? AND status = 1 AND quantity > 0 AND expired_at >= CURDATE() FOR UPDATE",
+        [coupon_code],
       );
       const coupon = coupons[0];
 
-      if (!coupon) {
-        throw new Error("Mã giảm giá không hợp lệ hoặc đã hết hạn.");
-      }
-
+      if (!coupon) throw new Error("Mã giảm giá không hợp lệ hoặc đã hết hạn.");
       if (totalAmount < coupon.min_order_value) {
-        throw new Error(`Đơn hàng tối thiểu ${coupon.min_order_value.toLocaleString()}đ để dùng mã này.`);
+        throw new Error(
+          `Đơn hàng tối thiểu ${coupon.min_order_value.toLocaleString()}đ để dùng mã này.`,
+        );
       }
 
-      if (coupon.discount_type === "percent") {
-        discountAmount = Math.floor((totalAmount * coupon.discount_value) / 100);
-      } else {
-        discountAmount = parseFloat(coupon.discount_value);
-      }
+      discountAmount =
+        coupon.discount_type === "percent"
+          ? Math.floor((totalAmount * coupon.discount_value) / 100)
+          : parseFloat(coupon.discount_value);
+
       couponId = coupon.id;
-
-      await conn.query("UPDATE coupons SET quantity = quantity - 1 WHERE id = ?", [couponId]);
     }
 
-    const finalAmount = totalAmount - discountAmount;
+    const finalAmount = Math.max(0, totalAmount - discountAmount);
 
-    // 5️⃣ Lưu bảng orders (Lưu kèm địa chỉ cụ thể vào đơn hàng)
+    // -------------------------------------------------------------
+    // 4️⃣ THỰC THI (Sau khi tất cả các bước check ở trên đã PASS)
+    // -------------------------------------------------------------
+
+    // A. Cập nhật thông tin User (Nếu có đăng nhập)
+    if (user_id) {
+      await conn.query(
+        "UPDATE users SET address = ?, phone = ?, full_name = ? WHERE id = ?",
+        [address, phone, fullname, user_id],
+      );
+    }
+
+    // B. Trừ số lượng Coupon
+    if (couponId) {
+      await conn.query(
+        "UPDATE coupons SET quantity = quantity - 1 WHERE id = ?",
+        [couponId],
+      );
+    }
+
+    // C. Tạo Đơn hàng mới
+    const orderCode = "OD" + Date.now();
     const [orderResult] = await conn.query(
       `INSERT INTO orders 
-        (user_id, order_code, total_amount, discount_amount, final_amount, coupon_id, note,status, payment)
-       VALUES (?, ?, ?, ?, ?, ?, ?, "pending","cod")`,
+        (user_id, order_code, total_amount, discount_amount, final_amount, coupon_id, note, status, payment, address, phone)
+       VALUES (?, ?, ?, ?, ?, ?, ?, "pending", "cod", ?, ?)`,
       [
-        user_id, 
-        "OD" + Date.now(), 
-        totalAmount, 
-        discountAmount, 
-        finalAmount, 
-        couponId || null, 
-        note || null, 
-      ]
+        user_id,
+        orderCode,
+        totalAmount,
+        discountAmount,
+        finalAmount,
+        couponId,
+        note,
+        address,
+        phone,
+      ],
     );
 
     const orderId = orderResult.insertId;
 
-    // 6️⃣ Xử lý từng Item (Kiểm tra kho & Lưu order_items)
-    for (const item of sanitizedItems) {
-      const [products] = await conn.query(
-        "SELECT stock, title FROM books WHERE id = ? FOR UPDATE",
-        [item.product_id]
-      );
-      const product = products[0];
-
-      if (!product || product.stock < item.quantity) {
-        throw new Error(`Sản phẩm '${product?.title || 'Unknown'}' không đủ hàng.`);
-      }
-
+    // D. Lưu chi tiết đơn hàng & Trừ kho
+    for (const p of productChecks) {
       // Trừ kho
-      await conn.query("UPDATE books SET stock = stock - ? WHERE id = ?", [item.quantity, item.product_id]);
+      await conn.query("UPDATE books SET stock = stock - ? WHERE id = ?", [
+        p.order_qty,
+        p.id,
+      ]);
 
-      // Lưu chi tiết
+      // Lưu item
       await conn.query(
         `INSERT INTO order_items (order_id, product_id, product_name, price, quantity, total)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [orderId, item.product_id, item.product_name, item.price, item.quantity, item.total]
+        [orderId, p.id, p.title, p.sale_price, p.order_qty, p.itemTotal],
       );
     }
 
     await conn.commit();
-    console.log("--- Đặt hàng & Cập nhật địa chỉ thành công! ---");
-
     res.json({
       success: true,
-      message: "Đặt hàng thành công",
+      message: "Đặt hàng thành công!",
       order_id: orderId,
     });
-
   } catch (err) {
     await conn.rollback();
     console.error("--- LỖI ORDER ---", err.message);
@@ -154,7 +165,6 @@ router.post("/", auth, async (req, res) => {
     conn.release();
   }
 });
-
 /**
  * =========================
  * GET /api/orders
@@ -177,7 +187,8 @@ router.get("/", auth, isAdmin, async (req, res) => {
     }
 
     if (keyword) {
-      where += " AND (o.order_code LIKE ? OR u.full_name LIKE ? OR u.email LIKE ?)";
+      where +=
+        " AND (o.order_code LIKE ? OR u.full_name LIKE ? OR u.email LIKE ?)";
       params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
     }
 
@@ -211,7 +222,7 @@ router.get("/", auth, isAdmin, async (req, res) => {
       ORDER BY o.created_at DESC
       LIMIT ? OFFSET ?
       `,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     /* =======================
@@ -224,7 +235,7 @@ router.get("/", auth, isAdmin, async (req, res) => {
       LEFT JOIN users u ON o.user_id = u.id
       ${where}
       `,
-      params
+      params,
     );
 
     res.json({
@@ -252,7 +263,7 @@ router.get("/my", auth, async (req, res) => {
     `SELECT * FROM orders 
      WHERE user_id = ?
      ORDER BY created_at DESC`,
-    [userId]
+    [userId],
   );
 
   res.json(orders);
@@ -282,6 +293,7 @@ router.get("/:id", auth, async (req, res) => {
         o.final_amount,
         o.status,
         o.note,
+        o.pay_url,
         o.created_at,
         o.payment,
 
@@ -298,7 +310,7 @@ router.get("/:id", auth, async (req, res) => {
       LEFT JOIN coupons c ON o.coupon_id = c.id
       WHERE o.id = ?
       `,
-      [orderId]
+      [orderId],
     );
 
     if (!order) {
@@ -328,7 +340,7 @@ router.get("/:id", auth, async (req, res) => {
       FROM order_items
       WHERE order_id = ?
       `,
-      [orderId]
+      [orderId],
     );
 
     /* ======================
@@ -345,7 +357,7 @@ router.get("/:id", auth, async (req, res) => {
       FROM payments
       WHERE order_id = ?
       `,
-      [orderId]
+      [orderId],
     );
 
     res.json({
@@ -359,7 +371,6 @@ router.get("/:id", auth, async (req, res) => {
   }
 });
 
-
 /**
  * =========================
  * PUT /api/orders/:id/status
@@ -368,22 +379,16 @@ router.get("/:id", auth, async (req, res) => {
  */
 router.put("/:id/status", auth, isAdmin, async (req, res) => {
   const { status } = req.body;
-  const allowStatus = [
-    "pending",
-    "paid",
-    "shipping",
-    "completed",
-    "cancelled",
-  ];
+  const allowStatus = ["pending", "paid", "shipping", "completed", "cancelled"];
 
   if (!allowStatus.includes(status)) {
     return res.status(400).json({ message: "Trạng thái không hợp lệ" });
   }
 
-  await db.query(
-    "UPDATE orders SET status = ? WHERE id = ?",
-    [status, req.params.id]
-  );
+  await db.query("UPDATE orders SET status = ? WHERE id = ?", [
+    status,
+    req.params.id,
+  ]);
 
   res.json({ message: "Cập nhật trạng thái thành công" });
 });
@@ -397,10 +402,9 @@ router.put("/:id/status", auth, isAdmin, async (req, res) => {
 router.put("/:id/cancel", auth, async (req, res) => {
   const orderId = req.params.id;
 
-  const [[order]] = await db.query(
-    "SELECT * FROM orders WHERE id = ?",
-    [orderId]
-  );
+  const [[order]] = await db.query("SELECT * FROM orders WHERE id = ?", [
+    orderId,
+  ]);
 
   if (!order) {
     return res.status(404).json({ message: "Không tìm thấy đơn hàng" });
@@ -414,10 +418,9 @@ router.put("/:id/cancel", auth, async (req, res) => {
     return res.status(400).json({ message: "Không thể hủy đơn này" });
   }
 
-  await db.query(
-    "UPDATE orders SET status = 'cancelled' WHERE id = ?",
-    [orderId]
-  );
+  await db.query("UPDATE orders SET status = 'cancelled' WHERE id = ?", [
+    orderId,
+  ]);
 
   res.json({ message: "Hủy đơn hàng thành công" });
 });
