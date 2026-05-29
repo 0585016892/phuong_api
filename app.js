@@ -19,6 +19,7 @@ app.use("/api/dashboard", require("./routes/dashboard.routes"));
 app.use("/api/orders", require("./routes/order.routes"));
 app.use("/api/payment", require("./routes/momo.route"));
 
+// cập nhật lại đường dẫn API cho frontend
 const PORT = 2002;
 app.listen(PORT, () => {
   console.log(`🚀 Server chạy tại http://localhost:${PORT}`);
