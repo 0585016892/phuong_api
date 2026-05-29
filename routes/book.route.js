@@ -13,7 +13,7 @@ router.get("/", async (req, res) => {
   try {
     let {
       page = 1,
-      limit = 10,
+      limit = 100,
       keyword = "",
       category_id,
       min_price,
@@ -193,10 +193,9 @@ router.post("/", upload.array("images", 10), async (req, res) => {
         `/uploads/${file.filename}`,
       ]);
 
-      await db.query(
-        "INSERT INTO book_images (book_id, image_url) VALUES ?",
-        [imageValues]
-      );
+      await db.query("INSERT INTO book_images (book_id, image_url) VALUES ?", [
+        imageValues,
+      ]);
     }
 
     res.json({
@@ -267,10 +266,9 @@ router.put("/:id", upload.array("images", 10), async (req, res) => {
         `/uploads/${file.filename}`,
       ]);
 
-      await db.query(
-        "INSERT INTO book_images (book_id, image_url) VALUES ?",
-        [imageValues]
-      );
+      await db.query("INSERT INTO book_images (book_id, image_url) VALUES ?", [
+        imageValues,
+      ]);
     }
 
     res.json({ message: "✅ Cập nhật sách thành công" });
@@ -289,7 +287,7 @@ router.delete("/:id", async (req, res) => {
     // 1️⃣ Lấy danh sách ảnh của sách
     const [images] = await db.query(
       "SELECT image_url FROM book_images WHERE book_id = ?",
-      [id]
+      [id],
     );
 
     // 2️⃣ Xoá file ảnh khỏi server
@@ -304,10 +302,7 @@ router.delete("/:id", async (req, res) => {
     await db.query("DELETE FROM book_images WHERE book_id = ?", [id]);
 
     // 4️⃣ Xoá sách trong DB (XOÁ LUÔN)
-    const [result] = await db.query(
-      "DELETE FROM books WHERE id = ?",
-      [id]
-    );
+    const [result] = await db.query("DELETE FROM books WHERE id = ?", [id]);
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Không tìm thấy sách" });
@@ -323,22 +318,16 @@ router.delete("/:id", async (req, res) => {
 router.put("/:id/status", async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
-console.log(req.body);
-console.log(id);
-
+  console.log(req.body);
+  console.log(id);
 
   if (status === undefined) {
     return res.status(400).json({ message: "Thiếu status" });
   }
 
-  await db.query(
-    "UPDATE books SET status = ? WHERE id = ?",
-    [status, id]
-  );
+  await db.query("UPDATE books SET status = ? WHERE id = ?", [status, id]);
 
   res.json({ message: "Cập nhật trạng thái thành công" });
 });
-
-
 
 module.exports = router;

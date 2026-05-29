@@ -174,27 +174,47 @@ router.post("/", auth, async (req, res) => {
 router.get("/", auth, isAdmin, async (req, res) => {
   try {
     let { page = 1, limit = 10, status, keyword } = req.query;
+
     page = Number(page);
     limit = Number(limit);
+
     const offset = (page - 1) * limit;
 
     let where = "WHERE 1=1";
     const params = [];
 
+    // =========================
+    // FILTER STATUS
+    // =========================
     if (status) {
       where += " AND o.status = ?";
       params.push(status);
     }
 
+    // =========================
+    // SEARCH
+    // =========================
     if (keyword) {
-      where +=
-        " AND (o.order_code LIKE ? OR u.full_name LIKE ? OR u.email LIKE ?)";
-      params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+      where += `
+        AND (
+          o.order_code LIKE ?
+          OR u.full_name LIKE ?
+          OR u.email LIKE ?
+          OR u.phone LIKE ?
+        )
+      `;
+
+      params.push(
+        `%${keyword}%`,
+        `%${keyword}%`,
+        `%${keyword}%`,
+        `%${keyword}%`,
+      );
     }
 
-    /* =======================
-       QUERY DATA
-    ======================= */
+    // =========================
+    // GET ORDERS
+    // =========================
     const [orders] = await db.query(
       `
       SELECT
@@ -215,38 +235,131 @@ router.get("/", auth, isAdmin, async (req, res) => {
         c.code AS coupon_code
 
       FROM orders o
-      LEFT JOIN users u ON o.user_id = u.id
-      LEFT JOIN coupons c ON o.coupon_id = c.id
+
+      LEFT JOIN users u
+        ON o.user_id = u.id
+
+      LEFT JOIN coupons c
+        ON o.coupon_id = c.id
 
       ${where}
+
       ORDER BY o.created_at DESC
+
       LIMIT ? OFFSET ?
       `,
       [...params, limit, offset],
     );
 
-    /* =======================
-       QUERY COUNT
-    ======================= */
-    const [[count]] = await db.query(
+    // =========================
+    // COUNT PAGINATION
+    // =========================
+    const [[countResult]] = await db.query(
       `
-      SELECT COUNT(*) total
+      SELECT COUNT(*) AS total
+
       FROM orders o
-      LEFT JOIN users u ON o.user_id = u.id
+
+      LEFT JOIN users u
+        ON o.user_id = u.id
+
       ${where}
       `,
       params,
     );
 
+    // =========================
+    // FULL STATISTICS
+    // KHÔNG LIMIT / OFFSET
+    // =========================
+    const [[statistics]] = await db.query(
+      `
+      SELECT
+
+        COUNT(*) AS totalOrders,
+
+        SUM(
+          CASE
+            WHEN o.status = 'pending'
+            THEN 1
+            ELSE 0
+          END
+        ) AS pendingOrders,
+
+        SUM(
+          CASE
+            WHEN o.status = 'paid'
+            THEN 1
+            ELSE 0
+          END
+        ) AS paidOrders,
+
+        SUM(
+          CASE
+            WHEN o.status = 'shipping'
+            THEN 1
+            ELSE 0
+          END
+        ) AS shippingOrders,
+
+        SUM(
+          CASE
+            WHEN o.status = 'completed'
+            THEN 1
+            ELSE 0
+          END
+        ) AS completedOrders,
+
+        SUM(
+          CASE
+            WHEN o.status = 'cancelled'
+            THEN 1
+            ELSE 0
+          END
+        ) AS cancelledOrders,
+
+        COALESCE(
+          SUM(
+            CASE
+              WHEN o.status = 'completed'
+              THEN o.final_amount
+              ELSE 0
+            END
+          ),
+          0
+        ) AS totalRevenue
+
+      FROM orders o
+
+      LEFT JOIN users u
+        ON o.user_id = u.id
+
+      ${where}
+      `,
+      params,
+    );
+
+    // =========================
+    // RESPONSE
+    // =========================
     res.json({
       data: orders,
-      total: count.total,
-      page,
-      limit,
+
+      pagination: {
+        total: countResult.total,
+        page,
+        limit,
+        totalPages: Math.ceil(countResult.total / limit),
+      },
+
+      statistics,
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Server error" });
+
+    res.status(500).json({
+      message: "Server error",
+    });
   }
 });
 
