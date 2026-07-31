@@ -18,7 +18,7 @@ app.use("/api/coupons", require("./routes/coupon.routes"));
 app.use("/api/dashboard", require("./routes/dashboard.routes"));
 app.use("/api/orders", require("./routes/order.routes"));
 app.use("/api/payment", require("./routes/momo.route"));
-
+app.use("/api/authors", require("./routes/author.routes"));
 // cập nhật lại đường dẫn API cho frontend
 const PORT = 2002;
 app.listen(PORT, () => {
